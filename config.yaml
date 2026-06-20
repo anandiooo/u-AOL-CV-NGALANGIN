@@ -1,0 +1,60 @@
+model:
+  weights: "../models/v11-optimized-fast/weights/best.pt"
+  base_model: "yolov8x-seg.pt"
+  confidence_threshold: 0.45
+  iou_threshold: 0.5
+  device: "cpu"
+  img_size: 640
+
+classes:
+  0: "drivable_road"
+  1: "obstruction"
+
+colors:
+  drivable_road: [0, 200, 0]
+  obstruction: [0, 0, 220]
+
+mask_alpha: 0.45
+
+morphology:
+  enabled: true
+  kernel_size: 5
+  open_iterations: 1
+  close_iterations: 2
+
+temporal:
+  enabled: true
+  method: "ema"
+  ema_alpha: 0.3
+  window_size: 8
+
+alerts:
+  normal:
+    max: 20
+    color: [0, 200, 0]
+    label: "Normal"
+  moderate:
+    min: 20
+    max: 40
+    color: [0, 165, 255]
+    label: "Moderate"
+  high:
+    min: 40
+    max: 60
+    color: [0, 80, 255]
+    label: "High"
+  critical:
+    min: 60
+    color: [0, 0, 220]
+    label: "Critical"
+
+stream:
+  target_fps: 8
+  frame_skip: 2
+  reconnect_delay_s: 3
+  max_reconnect_attempts: 10
+
+calibration:
+  roi_points: []
+  bev_width: 400
+  bev_height: 600
