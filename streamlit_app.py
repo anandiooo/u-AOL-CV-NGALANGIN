@@ -1,24 +1,37 @@
 from __future__ import annotations
+
+import shutil
 import sys
 import tempfile
 import time
-import shutil
 from pathlib import Path
+
 import cv2
 import numpy as np
 import streamlit as st
+
+from features import detect_fast_keypoints, verify_gerobak_mask
+from geometry import (
+	compute_accessibility,
+	compute_area_m2,
+	compute_homography,
+	pixel_to_meter_ratio,
+	warp_mask,
+)
+from perception import DualModelPerception
+from processing import clean_mask
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 SRC_ROOT = PROJECT_ROOT / "src"
 sys.path.insert(0, str(SRC_ROOT))
-from perception import DualModelPerception
-from processing import clean_mask
-from features import detect_fast_keypoints, verify_gerobak_mask
-from geometry import compute_homography, warp_mask, pixel_to_meter_ratio, compute_area_m2, compute_accessibility
+
+
 st.set_page_config(
 	page_title="Road Capacity & Sidewalk Dashboard",
 	layout="wide",
 	initial_sidebar_state="expanded",
 )
+
 st.markdown(
 	"""
 <style>
@@ -197,6 +210,8 @@ if "frame_width" not in st.session_state:
 	st.session_state["frame_width"] = 640
 if "frame_height" not in st.session_state:
 	st.session_state["frame_height"] = 480
+
+# metric card
 def metric_card(label: str, value: str, sub: str = "") -> str:
 	sub_html = f'<div class="sub">{sub}</div>' if sub else ""
 	return (
@@ -206,11 +221,17 @@ def metric_card(label: str, value: str, sub: str = "") -> str:
 		f'{sub_html}'
 		f'</div>'
 	)
+
+# click start resume
 def click_start_resume():
 	st.session_state["running"] = True
 	st.session_state["paused"] = False
+
+# click pause
 def click_pause():
 	st.session_state["paused"] = True
+
+# click stop
 def click_stop():
 	st.session_state["running"] = False
 	st.session_state["paused"] = False
@@ -219,20 +240,26 @@ def click_stop():
 		del st.session_state["last_results"]
 MODEL_DIR = PROJECT_ROOT / "models"
 MODEL_DIR.mkdir(exist_ok=True)
-DEFAULT_MODEL_A = MODEL_DIR / "v11-optimized-fast" / "weights" / "best.pt"
+DEFAULT_MODEL_A = MODEL_DIR / "yolov11_obstacle_model" / "weights" / "best.pt"
 DEFAULT_MODEL_B = MODEL_DIR / "yolov11x-seg.pt"
+
+# get accessibility color
 def get_accessibility_color(accessibility: float) -> str:
 	if accessibility >= 80.0:
 		return "var(--green)"
 	elif accessibility >= 50.0:
 		return "var(--yellow)"
 	return "var(--orange)"
+
+# get accessibility rating
 def get_accessibility_rating(accessibility: float) -> str:
 	if accessibility >= 80.0:
 		return "Accessible"
 	elif accessibility >= 50.0:
 		return "Partially Blocked"
 	return "Critically Blocked"
+
+# get available models
 def get_available_models() -> dict[str, Path]:
 	pt_files = list(MODEL_DIR.glob("**/*.pt"))
 	models_dict = {}
@@ -243,14 +270,16 @@ def get_available_models() -> dict[str, Path]:
 		except ValueError:
 			name = path.name
 		models_dict[name] = path
-	default_a_name = "v11-optimized-fast/weights/best.pt"
+	default_a_name = "yolov11_obstacle_model/weights/best.pt"
 	if default_a_name not in models_dict and DEFAULT_MODEL_A.exists():
 		models_dict[default_a_name] = DEFAULT_MODEL_A
 	default_b_name = "yolov11x-seg.pt"
 	if default_b_name not in models_dict and DEFAULT_MODEL_B.exists():
 		models_dict[default_b_name] = DEFAULT_MODEL_B
 	return models_dict
+
 @st.cache_resource
+# get ensemble classes
 def get_ensemble_classes(model_a_path_str: str, model_b_path_str: str) -> list[str]:
 	classes = set()
 	try:
@@ -270,6 +299,8 @@ def get_ensemble_classes(model_a_path_str: str, model_b_path_str: str) -> list[s
 	if not classes:
 		return ["gerobak", "sidewalk", "road"]
 	return sorted(list(classes))
+
+# verify and download weights
 def verify_and_download_weights(model_b_path: Path):
 	if not model_b_path.exists() and model_b_path == DEFAULT_MODEL_B:
 		st.info("Pre-trained Model B (yolov11x-seg.pt) not found. Downloading fallback YOLO11n-seg for environment maps...")
@@ -284,6 +315,8 @@ def verify_and_download_weights(model_b_path: Path):
 			return False
 	return True
 @st.cache_resource
+
+# load perception model
 def load_perception_model(model_a: Path, model_b: Path, conf: float, device: str | None) -> DualModelPerception:
 	return DualModelPerception(
 		gerobak_weights=model_a,
@@ -292,6 +325,8 @@ def load_perception_model(model_a: Path, model_b: Path, conf: float, device: str
 		env_conf=conf,
 		device=device,
 	)
+
+# draw detection overlays
 def draw_detection_overlays(
 	frame: np.ndarray,
 	gerobak_masks: list[tuple[np.ndarray, str, float]],
@@ -305,13 +340,16 @@ def draw_detection_overlays(
 	mask_alpha: float = 0.45,
 ) -> np.ndarray:
 	overlay = frame.copy()
+
 	if show_masks:
 		for mask, _, _ in sidewalk_masks:
 			overlay[mask > 0] = (0, 220, 0)
 		for mask, _, _ in gerobak_masks:
 			overlay[mask > 0] = (0, 0, 220)
+
 	blended = cv2.addWeighted(overlay, mask_alpha, frame, 1.0 - mask_alpha, 0)
-for mask, label, score in gerobak_masks:
+
+	for mask, label, score in gerobak_masks:
 		if show_outlines:
 			contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 			cv2.drawContours(blended, contours, -1, (0, 0, 255), 2)
@@ -322,6 +360,7 @@ for mask, label, score in gerobak_masks:
 					cY = int(M["m01"] / M["m00"])
 					text = f"{label} {score:.2f}"
 					cv2.putText(blended, text, (cX - 20, cY), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+
 	for mask, label, score in sidewalk_masks:
 		if show_outlines:
 			contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -333,16 +372,21 @@ for mask, label, score in gerobak_masks:
 					cY = int(M["m01"] / M["m00"])
 					text = f"{label} {score:.2f}"
 					cv2.putText(blended, text, (cX - 20, cY), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-if show_polygons:
+
+	if show_polygons:
 		pts = src_points.astype(np.int32).reshape((-1, 1, 2))
 		cv2.polylines(blended, [pts], isClosed=True, color=(255, 255, 0), thickness=2)
 		for idx, pt in enumerate(src_points):
 			cv2.circle(blended, (int(pt[0]), int(pt[1])), 6, (255, 255, 0), -1)
 			cv2.putText(blended, str(idx+1), (int(pt[0]) - 10, int(pt[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-if show_fast and keypoints:
+
+	if show_fast and keypoints:
 		for kp in keypoints:
 			cv2.circle(blended, (int(kp.pt[0]), int(kp.pt[1])), 3, (0, 255, 255), -1)
+
 	return blended
+
+# draw bev map
 def draw_bev_map(
 	bev_sidewalk: np.ndarray,
 	bev_gerobak: np.ndarray,
@@ -350,20 +394,26 @@ def draw_bev_map(
 	bev_height: int,
 ) -> np.ndarray:
 	bev_map = np.zeros((bev_height, bev_width, 3), dtype=np.uint8)
-true_sidewalk = cv2.bitwise_or(bev_sidewalk, bev_gerobak)
+	true_sidewalk = cv2.bitwise_or(bev_sidewalk, bev_gerobak)
 	bev_map[true_sidewalk > 0] = (15, 100, 15)
-bev_map[bev_gerobak > 0] = (15, 15, 200)
+	bev_map[bev_gerobak > 0] = (15, 15, 200)
+
 	for y in range(0, bev_height, 100):
 		cv2.line(bev_map, (0, y), (bev_width, y), (40, 50, 70), 1)
 	return bev_map
+
+# bgr to hex
 def bgr_to_hex(bgr: tuple[int, int, int]) -> str:
 	return f"#{bgr[2]:02x}{bgr[1]:02x}{bgr[0]:02x}"
+
+# render legend
 def render_legend(show_fast: bool = True) -> str:
 	html = '<div class="metric-card">'
 	legend_items = [
 		("Sidewalk Area", "#00DC00"),
 		("Gerobak Obstacle", "#DC0000"),
 	]
+
 	for label, color in legend_items:
 		html += (
 			f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">'
@@ -371,15 +421,19 @@ def render_legend(show_fast: bool = True) -> str:
 			f'<span style="font-size:0.9rem;">{label}</span>'
 			f'</div>'
 		)
+
 	if show_fast:
 		html += (
-			f'<div style="display:flex;align-items:center;gap:8px;margin-top:8px;border-top:1px solid var(--border);padding-top:8px;">'
-			f'<div style="width:14px;height:14px;background:#00C8FF;border-radius:3px;"></div>'
-			f'<span style="font-size:0.9rem;">FAST Features (Interest points)</span>'
-			f'</div>'
+			'<div style="display:flex;align-items:center;gap:8px;margin-top:8px;border-top:1px solid var(--border);padding-top:8px;">'
+			'<div style="width:14px;height:14px;background:#00C8FF;border-radius:3px;"></div>'
+			'<span style="font-size:0.9rem;">FAST Features (Interest points)</span>'
+			'</div>'
 		)
 	html += '</div>'
+
 	return html
+
+# process frame
 def process_frame(
 	frame: np.ndarray,
 	perception_model: DualModelPerception,
@@ -398,45 +452,50 @@ def process_frame(
 	bev_height: int = 600,
 ) -> dict:
 	height, width = frame.shape[:2]
-output = perception_model.predict(frame)
-cleaned_gerobak: list[tuple[np.ndarray, str, float]] = []
+	output = perception_model.predict(frame)
+	cleaned_gerobak: list[tuple[np.ndarray, str, float]] = []
 	cleaned_sidewalk: list[tuple[np.ndarray, str, float]] = []
 	all_fast_keypoints: list[cv2.KeyPoint] = []
 	gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-sel_normalized = {c.lower().strip() for c in selected_classes}
+	sel_normalized = {c.lower().strip() for c in selected_classes}
+
 	for det in output.gerobak:
 		c_name = det.class_name.lower().strip()
 		if c_name not in sel_normalized and "gerobak" not in sel_normalized:
 			continue
 		cleaned = clean_mask(det.mask)
-if c_name in ["sidewalk", "trotoar", "pavement"]:
+		if c_name in ["sidewalk", "trotoar", "pavement"]:
 			cleaned_sidewalk.append((cleaned, det.class_name, det.score))
 			continue
-if apply_fast:
+		if apply_fast:
 			verified = verify_gerobak_mask(gray, cleaned, threshold=fast_threshold, min_keypoints=fast_min_count)
 			if not verified:
 				continue
 			kps = detect_fast_keypoints(gray, cleaned, threshold=fast_threshold)
 			all_fast_keypoints.extend(kps)
 		cleaned_gerobak.append((cleaned, det.class_name, det.score))
+
 	for det in output.sidewalk:
 		cleaned_sidewalk.append((clean_mask(det.mask), det.class_name, det.score))
-union_sidewalk = np.zeros((height, width), dtype=np.uint8)
+	union_sidewalk = np.zeros((height, width), dtype=np.uint8)
+
 	for mask_tuple in cleaned_sidewalk:
 		mask = mask_tuple[0]
 		if mask.shape[:2] != (height, width):
 			mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
 		union_sidewalk = cv2.bitwise_or(union_sidewalk, mask.astype(np.uint8))
 	union_gerobak = np.zeros((height, width), dtype=np.uint8)
+
 	for mask_tuple in cleaned_gerobak:
 		mask = mask_tuple[0]
 		if mask.shape[:2] != (height, width):
 			mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
 		union_gerobak = cv2.bitwise_or(union_gerobak, mask.astype(np.uint8))
-roi_mask = np.zeros((height, width), dtype=np.uint8)
+	roi_mask = np.zeros((height, width), dtype=np.uint8)
 	pts = src_points.astype(np.int32).reshape((-1, 1, 2))
 	cv2.fillPoly(roi_mask, [pts], 255)
-masked_gerobak = []
+	masked_gerobak = []
+
 	for mask, label, score in cleaned_gerobak:
 		if mask.shape[:2] != (height, width):
 			mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
@@ -445,6 +504,7 @@ masked_gerobak = []
 			masked_gerobak.append((masked_m, label, score))
 	cleaned_gerobak = masked_gerobak
 	masked_sidewalk = []
+
 	for mask, label, score in cleaned_sidewalk:
 		if mask.shape[:2] != (height, width):
 			mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
@@ -452,23 +512,26 @@ masked_gerobak = []
 		if cv2.countNonZero(masked_m) > 0:
 			masked_sidewalk.append((masked_m, label, score))
 	cleaned_sidewalk = masked_sidewalk
-union_sidewalk = np.zeros((height, width), dtype=np.uint8)
+	union_sidewalk = np.zeros((height, width), dtype=np.uint8)
+
 	for mask_tuple in cleaned_sidewalk:
 		mask = mask_tuple[0]
 		union_sidewalk = cv2.bitwise_or(union_sidewalk, mask.astype(np.uint8))
 	union_gerobak = np.zeros((height, width), dtype=np.uint8)
+
 	for mask_tuple in cleaned_gerobak:
 		mask = mask_tuple[0]
 		union_gerobak = cv2.bitwise_or(union_gerobak, mask.astype(np.uint8))
+
 	bev_sidewalk = warp_mask(union_sidewalk, homography, (bev_width, bev_height))
 	bev_gerobak = warp_mask(union_gerobak, homography, (bev_width, bev_height))
-blocked_bev = bev_gerobak
+	blocked_bev = bev_gerobak
 	true_sidewalk_bev = cv2.bitwise_or(bev_sidewalk, bev_gerobak)
 	total_sidewalk_area = compute_area_m2(true_sidewalk_bev, ratio)
 	blocked_area = compute_area_m2(blocked_bev, ratio)
 	clear_area = max(0.0, total_sidewalk_area - blocked_area)
 	accessibility = compute_accessibility(clear_area, total_sidewalk_area)
-overlay_frame = draw_detection_overlays(
+	overlay_frame = draw_detection_overlays(
 		frame=frame,
 		gerobak_masks=cleaned_gerobak,
 		sidewalk_masks=cleaned_sidewalk,
@@ -480,6 +543,7 @@ overlay_frame = draw_detection_overlays(
 		show_polygons=show_polygons,
 		mask_alpha=mask_alpha,
 	)
+
 	bev_map = draw_bev_map(bev_sidewalk, bev_gerobak, bev_width, bev_height)
 	return {
 		"overlay_frame": overlay_frame,
@@ -491,6 +555,8 @@ overlay_frame = draw_detection_overlays(
 		"gerobak_count": len(cleaned_gerobak),
 		"fast_count": len(all_fast_keypoints),
 	}
+
+# run stream
 def run_stream(
 	video_source: int | str,
 	perception_model: DualModelPerception,
@@ -512,26 +578,32 @@ def run_stream(
 	status_placeholder: st.delta_generator.DeltaGenerator,
 ) -> None:
 	cap = cv2.VideoCapture(video_source)
+
 	if not cap.isOpened():
 		st.error(f"Could not open video source: {video_source}")
 		st.session_state["running"] = False
 		return
+
 	frame_index = st.session_state.get("video_frame_index", 0)
 	if frame_index > 0 and isinstance(video_source, str):
 		cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
 	last_time = None
+
 	while st.session_state.get("running", False):
 		if st.session_state.get("paused", False):
 			break
 		ok, frame = cap.read()
+
 		if not ok:
 			st.session_state["video_frame_index"] = 0
 			st.session_state["running"] = False
 			break
 		frame_index += 1
+
 		if frame_index % frame_skip != 0:
 			continue
 		h, w = frame.shape[:2]
+
 		if st.session_state["frame_width"] != w or st.session_state["frame_height"] != h:
 			st.session_state["frame_width"] = w
 			st.session_state["frame_height"] = h
@@ -595,6 +667,7 @@ def run_stream(
 		st.session_state["video_frame_index"] = frame_index
 		time.sleep(0.01)
 	cap.release()
+
 	if not st.session_state.get("paused", False):
 		st.session_state["running"] = False
 		st.session_state["video_frame_index"] = 0
@@ -605,6 +678,7 @@ def run_stream(
 			'</div>',
 			unsafe_allow_html=True,
 		)
+
 st.markdown(
 	'<div style="margin-bottom:1.5rem">'
 	'<h1 style="font-size:2.4rem;font-weight:600;margin:0;color:var(--text-main);">'
@@ -612,14 +686,17 @@ st.markdown(
 	'</div>',
 	unsafe_allow_html=True,
 )
+
 tab1, tab2 = st.tabs(["Analysis Dashboard", "Model Evaluation"])
 with tab1:
 	m1, m2, m3, m4, m5 = st.columns(5)
 	metric_placeholders = (m1.empty(), m2.empty(), m3.empty(), m4.empty(), m5.empty())
+
 	for metric in metric_placeholders:
 		metric.markdown(metric_card("Metric", "--"), unsafe_allow_html=True)
 	st.markdown("")
-frame_col1, frame_col2 = st.columns([1.2, 0.8])
+	frame_col1, frame_col2 = st.columns([1.2, 0.8])
+
 	with frame_col1:
 		combined_placeholder = st.empty()
 		combined_placeholder.markdown(
@@ -628,6 +705,7 @@ frame_col1, frame_col2 = st.columns([1.2, 0.8])
 			'</div>',
 			unsafe_allow_html=True,
 		)
+
 	with frame_col2:
 		bev_placeholder = st.empty()
 		bev_placeholder.markdown(
@@ -637,19 +715,25 @@ frame_col1, frame_col2 = st.columns([1.2, 0.8])
 			unsafe_allow_html=True,
 		)
 	error_placeholder = st.empty()
+
 class DummyPlaceholder:
+	# markdown
 	def markdown(self, *args, **kwargs):
 		pass
+	# image
 	def image(self, *args, **kwargs):
 		pass
+	# empty
 	def empty(self, *args, **kwargs):
 		return self
 status_placeholder = DummyPlaceholder()
+
 with st.sidebar:
 	st.markdown('<div class="section-heading" style="margin-top:0;">Control Panel</div>', unsafe_allow_html=True)
 	col_btn1, col_btn2, col_btn3 = st.columns(3)
 	is_paused = st.session_state.get("paused", False)
 	is_running = st.session_state.get("running", False)
+
 	with col_btn1:
 		start_label = "▶ Resume" if (is_running and is_paused) else "▶ Start"
 		st.button(
@@ -660,6 +744,7 @@ with st.sidebar:
 			disabled=is_running and not is_paused,
 			key="btn_start_resume"
 		)
+
 	with col_btn2:
 		st.button(
 			"⏸ Pause",
@@ -668,6 +753,7 @@ with st.sidebar:
 			on_click=click_pause,
 			key="btn_pause"
 		)
+
 	with col_btn3:
 		st.button(
 			"⏹ Stop",
@@ -676,6 +762,7 @@ with st.sidebar:
 			on_click=click_stop,
 			key="btn_stop"
 		)
+
 	with st.expander("Source Input Settings", expanded=True):
 		source_type = st.selectbox(
 			"Input Source Type",
@@ -704,11 +791,13 @@ with st.sidebar:
 					video_source = tmp.name
 		else:
 			video_source = 0
-with st.expander("Model & Class Settings", expanded=True):
+
+	with st.expander("Model & Class Settings", expanded=True):
 		available_models = get_available_models()
 		model_a_options = list(available_models.keys())
-		default_a_key = "v11-optimized-fast/weights/best.pt"
+		default_a_key = "yolov11_obstacle_model/weights/best.pt"
 		default_a_idx = 0
+
 		if default_a_key in model_a_options:
 			default_a_idx = model_a_options.index(default_a_key)
 		selected_model_a = st.selectbox(
@@ -721,6 +810,7 @@ with st.expander("Model & Class Settings", expanded=True):
 		model_b_options = list(available_models.keys())
 		default_b_key = "yolov11x-seg.pt"
 		default_b_idx = min(1, len(model_b_options) - 1) if model_b_options else 0
+
 		if default_b_key in model_b_options:
 			default_b_idx = model_b_options.index(default_b_key)
 		selected_model_b = st.selectbox(
@@ -730,14 +820,15 @@ with st.expander("Model & Class Settings", expanded=True):
 			key="model_b_select",
 		)
 		weights_b_path = available_models[selected_model_b]
-ensemble_classes = get_ensemble_classes(str(weights_a_path), str(weights_b_path))
+		ensemble_classes = get_ensemble_classes(str(weights_a_path), str(weights_b_path))
 		selected_classes = st.multiselect(
 			"Classes to Detect & Audit",
 			options=ensemble_classes,
 			default=[c for c in ensemble_classes if c.lower() in ["gerobak", "sidewalk", "ngalangin", "motorcycle", "motor", "trotoar"]],
 			key="classes_select_ensemble",
 		)
-with st.expander("Calibration & Thresholds", expanded=False):
+
+	with st.expander("Calibration & Thresholds", expanded=False):
 		conf_val = st.selectbox(
 			"Model Confidence Threshold",
 			options=[0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9],
@@ -750,7 +841,7 @@ with st.expander("Calibration & Thresholds", expanded=False):
 			index=4,
 			key="sidewalk_width_select"
 		)
-roi_preset = st.selectbox(
+		roi_preset = st.selectbox(
 			"ROI Presets (Perspective Transform)",
 			options=["Default (Centered)", "Wide View", "Narrow View", "Custom Coordinates"],
 			index=0,
@@ -758,6 +849,7 @@ roi_preset = st.selectbox(
 		)
 		w_val = st.session_state["frame_width"]
 		h_val = st.session_state["frame_height"]
+
 		if roi_preset == "Default (Centered)":
 			x_tl, y_tl = int(w_val * 0.25), int(h_val * 0.55)
 			x_bl, y_bl = int(w_val * 0.05), int(h_val * 0.95)
@@ -775,6 +867,7 @@ roi_preset = st.selectbox(
 			x_br, y_br = int(w_val * 0.85), int(h_val * 0.92)
 		else:
 			st.markdown("##### Custom ROI Coordinates")
+			# parse pt
 			def parse_pt(pt_str, default_val):
 				try:
 					parts = pt_str.replace("(", "").replace(")", "").split(",")
@@ -784,6 +877,7 @@ roi_preset = st.selectbox(
 					pass
 				return default_val
 			c1, c2 = st.columns(2)
+
 			with c1:
 				pt1_input = st.text_input("Top-Left (X, Y)", value=f"{int(w_val * 0.25)}, {int(h_val * 0.55)}", key="roi_pt1")
 				pt4_input = st.text_input("Bottom-Left (X, Y)", value=f"{int(w_val * 0.05)}, {int(h_val * 0.95)}", key="roi_pt4")
@@ -798,7 +892,7 @@ roi_preset = st.selectbox(
 			[[x_tl, y_tl], [x_tr, y_tr], [x_br, y_br], [x_bl, y_bl]],
 			dtype=np.float32,
 		)
-bev_width = 400
+		bev_width = 400
 		bev_height = 600
 		dst_pts = np.array(
 			[[0, 0], [bev_width, 0], [bev_width, bev_height], [0, bev_height]],
@@ -806,7 +900,8 @@ bev_width = 400
 		)
 		H_matrix = compute_homography(src_pts, dst_pts)
 		ratio = pixel_to_meter_ratio(bev_width, sidewalk_width_m)
-with st.expander("Advanced Settings & Styling", expanded=False):
+
+	with st.expander("Advanced Settings & Styling", expanded=False):
 		st.markdown('<div class="section-heading" style="margin-top:0;">FAST Point Verification</div>', unsafe_allow_html=True)
 		apply_fast = st.checkbox("Enable FAST Verification", value=True, key="apply_fast_auditor")
 		fast_threshold = st.slider("FAST Threshold", 1, 100, 25, key="fast_thresh_auditor")
@@ -821,13 +916,16 @@ with st.expander("Advanced Settings & Styling", expanded=False):
 	legend_placeholder = st.empty()
 	legend_placeholder.markdown(render_legend(show_fast=apply_fast), unsafe_allow_html=True)
 current_source_key = f"{source_type}_{uploaded.name if uploaded else ''}"
+
 if st.session_state.get("last_source_key") != current_source_key:
 	st.session_state["last_source_key"] = current_source_key
 	st.session_state["running"] = False
 	st.session_state["paused"] = False
 	st.session_state["video_frame_index"] = 0
+
 	if "last_results" in st.session_state:
 		del st.session_state["last_results"]
+
 if st.session_state.get("running", False):
 	if st.session_state.get("paused", False):
 		if "last_results" in st.session_state:
@@ -1013,6 +1111,7 @@ else:
 					cap.release()
 			except Exception:
 				pass
+
 		if preview_image is not None:
 			h, w = preview_image.shape[:2]
 			if st.session_state["frame_width"] != w or st.session_state["frame_height"] != h:
@@ -1034,8 +1133,10 @@ else:
 				'</div>',
 				unsafe_allow_html=True,
 			)
+
+# load eval metrics
 def load_eval_metrics() -> dict:
-	csv_path = MODEL_DIR / "v11-optimized-fast" / "results.csv"
+	csv_path = MODEL_DIR / "yolov11_obstacle_model" / "results.csv"
 	metrics = {
 		"box_precision": 0.0, "box_recall": 0.0, "box_map50": 0.0, "box_map95": 0.0, "box_f1": 0.0,
 		"mask_precision": 0.0, "mask_recall": 0.0, "mask_map50": 0.0, "mask_map95": 0.0, "mask_f1": 0.0,
@@ -1058,7 +1159,7 @@ def load_eval_metrics() -> dict:
 				metrics["mask_recall"] = float(row.get("metrics/recall(M)", 0.0))
 				metrics["mask_map50"] = float(row.get("metrics/mAP50(M)", 0.0))
 				metrics["mask_map95"] = float(row.get("metrics/mAP50-95(M)", 0.0))
-p_b, r_b = metrics["box_precision"], metrics["box_recall"]
+				p_b, r_b = metrics["box_precision"], metrics["box_recall"]
 				if (p_b + r_b) > 0:
 					metrics["box_f1"] = 2 * (p_b * r_b) / (p_b + r_b)
 				p_m, r_m = metrics["mask_precision"], metrics["mask_recall"]
@@ -1069,20 +1170,22 @@ p_b, r_b = metrics["box_precision"], metrics["box_recall"]
 	return metrics
 with tab2:
 	st.markdown('<h3 style="color:var(--text-main);">Model Performance & Evaluation</h3>', unsafe_allow_html=True)
-col_info1, col_info2 = st.columns(2)
+	col_info1, col_info2 = st.columns(2)
+
 	with col_info1:
 		st.markdown(
 			'<div class="metric-card" style="height:175px;">'
 			'<div class="label" style="color:var(--primary);font-weight:600;">Model A (Obstacle Segmenter)</div>'
-			'<div class="value" style="font-size:1.3rem;margin-bottom:0.4rem;">YOLOv11-seg (Optimized/Fast)</div>'
+			'<div class="value" style="font-size:1.3rem;margin-bottom:0.4rem;">YOLOv11-seg (Obstacle Model)</div>'
 			'<div class="sub" style="font-size:0.85rem;line-height:1.4;">'
-			'• <b>Weights:</b> <code>v11-optimized-fast/weights/best.pt</code><br>'
+			'• <b>Weights:</b> <code>yolov11_obstacle_model/weights/best.pt</code><br>'
 			'• <b>Target Class:</b> Gerobak (sidewalk carts)<br>'
 			'• <b>Details:</b> Fine-tuned for detecting mobile sidewalk vendor obstacles.'
 			'</div>'
 			'</div>',
 			unsafe_allow_html=True,
 		)
+
 	with col_info2:
 		st.markdown(
 			'<div class="metric-card" style="height:175px;">'
@@ -1100,6 +1203,7 @@ col_info1, col_info2 = st.columns(2)
 	st.markdown('<h4 style="color:var(--text-main);">Model A Key Evaluation Metrics (Last Epoch)</h4>', unsafe_allow_html=True)
 	eval_metrics = load_eval_metrics()
 	col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+
 	with col_m1:
 		st.markdown(
 			f'<div class="metric-card">'
@@ -1109,6 +1213,7 @@ col_info1, col_info2 = st.columns(2)
 			f'</div>',
 			unsafe_allow_html=True,
 		)
+
 	with col_m2:
 		st.markdown(
 			f'<div class="metric-card">'
@@ -1118,6 +1223,7 @@ col_info1, col_info2 = st.columns(2)
 			f'</div>',
 			unsafe_allow_html=True,
 		)
+
 	with col_m3:
 		st.markdown(
 			f'<div class="metric-card">'
@@ -1127,6 +1233,7 @@ col_info1, col_info2 = st.columns(2)
 			f'</div>',
 			unsafe_allow_html=True,
 		)
+
 	with col_m4:
 		st.markdown(
 			f'<div class="metric-card">'
@@ -1174,13 +1281,14 @@ col_info1, col_info2 = st.columns(2)
 		unsafe_allow_html=True
 	)
 	st.markdown('<div style="margin-top:1.5rem;"></div>', unsafe_allow_html=True)
-	eval_dir = MODEL_DIR / "v11-optimized-fast"
+	eval_dir = MODEL_DIR / "yolov11_obstacle_model"
 	eval_subtab1, eval_subtab2, eval_subtab3, eval_subtab4 = st.tabs([
 		"Training Progress & Loss (Model A)",
 		"Confusion Matrix (Model A)",
 		"PR & F1 Curves (Model A)",
 		"Label Analysis (Model A)"
 	])
+
 	with eval_subtab1:
 		st.markdown("#### Training Results and Loss Curves (Model A)")
 		results_png = eval_dir / "results.png"
@@ -1188,6 +1296,7 @@ col_info1, col_info2 = st.columns(2)
 			st.image(str(results_png), caption="YOLOv11 training losses and metrics over epochs (Model A)", use_container_width=True)
 		else:
 			st.warning("Training results image (results.png) not found.")
+
 	with eval_subtab2:
 		st.markdown("#### Confusion Matrix (Model A)")
 		col_cm1, col_cm2 = st.columns(2)
@@ -1199,6 +1308,7 @@ col_info1, col_info2 = st.columns(2)
 			cm_raw = eval_dir / "confusion_matrix.png"
 			if cm_raw.exists():
 				st.image(str(cm_raw), caption="Raw Confusion Matrix (Model A)", use_container_width=True)
+
 	with eval_subtab3:
 		st.markdown("#### Precision-Recall & F1-Confidence Curves (Model A)")
 		st.markdown("##### Mask-level Segmentation Metrics (Model A)")
@@ -1222,6 +1332,7 @@ col_info1, col_info2 = st.columns(2)
 			box_f1 = eval_dir / "BoxF1_curve.png"
 			if box_f1.exists():
 				st.image(str(box_f1), caption="Box F1-Confidence Curve (Model A)", use_container_width=True)
+
 	with eval_subtab4:
 		st.markdown("#### Labels and Predictions Analysis (Model A)")
 		col_lbl1, col_lbl2 = st.columns(2)

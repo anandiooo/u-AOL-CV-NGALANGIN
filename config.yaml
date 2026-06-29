@@ -1,5 +1,5 @@
 model:
-  weights: "../models/v11-optimized-fast/weights/best.pt"
+  weights: "../models/yolov11_obstacle_model/weights/best.pt"
   base_model: "yolov8x-seg.pt"
   confidence_threshold: 0.45
   iou_threshold: 0.5
