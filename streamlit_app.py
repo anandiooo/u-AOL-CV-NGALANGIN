@@ -10,6 +10,10 @@ import cv2
 import numpy as np
 import streamlit as st
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+SRC_ROOT = PROJECT_ROOT / "src"
+sys.path.insert(0, str(SRC_ROOT))
+
 from features import detect_fast_keypoints, verify_gerobak_mask
 from geometry import (
 	compute_accessibility,
@@ -20,10 +24,6 @@ from geometry import (
 )
 from perception import DualModelPerception
 from processing import clean_mask
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-SRC_ROOT = PROJECT_ROOT / "src"
-sys.path.insert(0, str(SRC_ROOT))
 
 
 st.set_page_config(
